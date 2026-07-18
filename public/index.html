@@ -10261,6 +10261,10 @@ Position Saved: ✅ Yes
             localData._supabaseId = docId;
             localData._lastSynced = new Date().toISOString();
             localData._syncSource = 'remote';
+
+            if ((storeName === 'events' || storeName === 'meetings') && Array.isArray(localData.attachments)) {
+                localData.attachments = await this.rehydrateAttachmentsFromStorage(localData.attachments);
+            }
             
             const localId = await this.getLocalIdBySupabaseId(storeName, docId);
             
@@ -10534,11 +10538,19 @@ Position Saved: ✅ Yes
                 includeMedia = localStorage.getItem('mediaSyncEnabled') === 'true';
             }
             
-            if (!includeMedia && (storeName === 'events' || storeName === 'meetings')) {
-                const dataWithoutMedia = { ...supabaseData };
-                delete dataWithoutMedia.attachments;
-                supabaseData = dataWithoutMedia;
-                console.log(`Supabase Sync: Media files excluded from ${storeName}/${data.id}`);
+            if ((storeName === 'events' || storeName === 'meetings') && Array.isArray(supabaseData.attachments)) {
+                if (!includeMedia) {
+                    const dataWithoutMedia = { ...supabaseData };
+                    delete dataWithoutMedia.attachments;
+                    supabaseData = dataWithoutMedia;
+                    console.log(`Supabase Sync: Media files excluded from ${storeName}/${data.id}`);
+                } else {
+                    const uploadedAttachments = await this.uploadAttachmentsToStorage(
+                        supabaseData.attachments, storeName, localId
+                    );
+                    supabaseData = { ...supabaseData, attachments: uploadedAttachments };
+                    console.log(`Supabase Sync: Attachments uploaded to Storage for ${storeName}/${data.id}`);
+                }
             }
             
             let formattedData = camelToSnake(supabaseData);
@@ -10797,6 +10809,10 @@ Position Saved: ✅ Yes
                             
                             if (storeName) {
                                 const { id, ...localData } = camelRow;
+
+                                if ((storeName === 'events' || storeName === 'meetings') && Array.isArray(localData.attachments)) {
+                                    localData.attachments = await this.rehydrateAttachmentsFromStorage(localData.attachments);
+                                }
                                 
                                 const isDuplicate = await this.checkForDuplicate(storeName, localData);
                                 if (!isDuplicate) {
@@ -11072,6 +11088,99 @@ Position Saved: ✅ Yes
 
     generateFirebaseId(storeName, data) {
         return `${storeName}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    // Convert a base64 data URI to a Blob for upload
+    dataUrlToBlob(dataUrl) {
+        const [header, base64] = dataUrl.split(',');
+        const mimeMatch = header.match(/data:(.*?);base64/);
+        const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new Blob([bytes], { type: mime });
+    }
+
+    // Upload any base64 attachments (events/meetings) to Supabase Storage,
+    // replacing the heavy 'data' field with a lightweight 'url' field.
+    // Local IndexedDB copy is never touched - this only affects what gets sent to Supabase.
+    async uploadAttachmentsToStorage(attachments, storeName, itemId) {
+        if (!Array.isArray(attachments) || attachments.length === 0) return attachments;
+
+        const uploaded = [];
+        for (let i = 0; i < attachments.length; i++) {
+            const att = attachments[i];
+            if (!att || !att.data || typeof att.data !== 'string' || !att.data.startsWith('data:')) {
+                uploaded.push(att);
+                continue;
+            }
+            try {
+                const blob = this.dataUrlToBlob(att.data);
+                const safeName = (att.name || `file_${i}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+                const path = `${storeName}/${itemId}/${Date.now()}_${i}_${safeName}`;
+
+                const { error: uploadError } = await supabaseClient
+                    .storage
+                    .from('rasm-attachments')
+                    .upload(path, blob, { contentType: att.type || blob.type, upsert: true });
+
+                if (uploadError) throw uploadError;
+
+                const { data: publicUrlData } = supabaseClient
+                    .storage
+                    .from('rasm-attachments')
+                    .getPublicUrl(path);
+
+                uploaded.push({
+                    name: att.name,
+                    type: att.type,
+                    size: att.size,
+                    uploadedAt: att.uploadedAt,
+                    url: publicUrlData.publicUrl,
+                    storagePath: path
+                });
+            } catch (error) {
+                console.error('Supabase Sync: Failed to upload attachment to Storage, falling back to inline data', error);
+                uploaded.push(att);
+            }
+        }
+        return uploaded;
+    }
+
+    // Fetch attachments that were stored as Storage URLs and convert them back to
+    // base64 data URIs, so the existing local app UI (which expects attachment.data)
+    // keeps working unchanged after a pull.
+    async rehydrateAttachmentsFromStorage(attachments) {
+        if (!Array.isArray(attachments) || attachments.length === 0) return attachments;
+
+        const rehydrated = [];
+        for (const att of attachments) {
+            if (!att || !att.url || att.data) {
+                rehydrated.push(att);
+                continue;
+            }
+            try {
+                const response = await fetch(att.url);
+                const blob = await response.blob();
+                const dataUrl = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                });
+                rehydrated.push({
+                    name: att.name,
+                    type: att.type,
+                    size: att.size,
+                    uploadedAt: att.uploadedAt,
+                    data: dataUrl
+                });
+            } catch (error) {
+                console.error('Supabase Sync: Failed to rehydrate attachment from Storage URL', error);
+                rehydrated.push(att);
+            }
+        }
+        return rehydrated;
     }
 
     async storeIdMapping(storeName, localId, supabaseId) {
