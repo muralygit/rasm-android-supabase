@@ -1,0 +1,71 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up JDK 21 (Zulu)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Clean install dependencies
+        run: |
+          rm -rf node_modules package-lock.json
+          npm cache clean --force
+          npm install --legacy-peer-deps
+
+      - name: Install Capacitor CLI globally
+        run: npm install -g @capacitor/cli
+
+      - name: Add Android platform
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Generate app icons
+        run: npx @capacitor/assets generate --android
+
+      - name: Regenerate Gradle wrapper (8.13)
+        run: |
+          cd android
+          curl -L -o /tmp/gradle-8.13-bin.zip https://services.gradle.org/distributions/gradle-8.13-bin.zip
+          unzip -q /tmp/gradle-8.13-bin.zip -d /tmp
+          /tmp/gradle-8.13/bin/gradle wrapper --gradle-version 8.13
+          chmod +x gradlew
+
+      - name: Strip stray debug signingConfig line
+        run: |
+          sed -i '/signingConfig signingConfigs.debug/d' android/app/build.gradle.kts || true
+
+      - name: Build debug APK
+        run: |
+          cd android
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: |
+          mkdir -p output
+          cp android/app/build/outputs/apk/debug/app-debug.apk output/RASM-v1.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RASM-v1
+          path: output/RASM-v1.apk

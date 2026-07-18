@@ -1,0 +1,6 @@
+{
+  "appId": "com.muraly.rasm",
+  "appName": "Residents Association Manager",
+  "webDir": "public",
+  "bundledWebRuntime": false
+}
