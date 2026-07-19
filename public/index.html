@@ -10674,6 +10674,10 @@ Position Saved: ✅ Yes
                 .upsert(formattedData)
                 .select();
                 
+            if ((storeName === 'meetings' || storeName === 'events') && includeMedia && (formattedData.attachments || []).length > 0) {
+                alert(`DEBUG 3/3\nUpsert to "${tableName}" (id sent: ${formattedData.id ?? 'NEW'})\nError: ${error ? JSON.stringify(error) : 'none'}\nResult attachments count: ${upsertResult && upsertResult[0] ? (upsertResult[0].attachments || []).length : 'N/A'}\nResult id: ${upsertResult && upsertResult[0] ? upsertResult[0].id : 'N/A'}`);
+            }
+                
             if (error) throw error;
             
             if (upsertResult && upsertResult.length > 0) {
