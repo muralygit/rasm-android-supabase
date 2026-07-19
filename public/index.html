@@ -10649,12 +10649,6 @@ Position Saved: ✅ Yes
             
             let formattedData = camelToSnake(supabaseData);
             
-            if ((storeName === 'meetings' || storeName === 'events') && includeMedia) {
-                const finalAttCount = (formattedData.attachments || []).length;
-                console.log(`Supabase Sync DEBUG: About to upsert ${storeName}/${localId}, formattedData.attachments count = ${finalAttCount}`, formattedData.attachments);
-                alert(`DEBUG 2/2\nAbout to save "${storeName}/${localId}"\nFinal attachments count: ${finalAttCount}\n${finalAttCount > 0 ? 'First URL: ' + (formattedData.attachments[0].data || '').substring(0, 60) : 'EMPTY!'}`);
-            }
-            
             formattedData._sync_source = 'local';
             formattedData._client_id = clientId;
             formattedData._last_synced = new Date().toISOString();
@@ -10674,8 +10668,9 @@ Position Saved: ✅ Yes
                 .upsert(formattedData)
                 .select();
                 
-            if ((storeName === 'meetings' || storeName === 'events') && includeMedia && (formattedData.attachments || []).length > 0) {
-                alert(`DEBUG 3/3\nUpsert to "${tableName}" (id sent: ${formattedData.id ?? 'NEW'})\nError: ${error ? JSON.stringify(error) : 'none'}\nResult attachments count: ${upsertResult && upsertResult[0] ? (upsertResult[0].attachments || []).length : 'N/A'}\nResult id: ${upsertResult && upsertResult[0] ? upsertResult[0].id : 'N/A'}`);
+            if (error) {
+                console.error(`Supabase Sync: upsert to ${tableName} failed`, error);
+                this.showNotification(`⚠️ Save failed for ${tableName}: ${error.message}`, 'error');
             }
                 
             if (error) throw error;
@@ -10759,13 +10754,6 @@ Position Saved: ✅ Yes
                                 }
                             }
                             
-                            if ((storeName === 'meetings' || storeName === 'events') && includeMedia) {
-                                const attCount = (item.attachments || []).length;
-                                console.log(`Supabase Sync DEBUG: About to push ${storeName}/${item.id} "${item.title || item.name}" with ${attCount} attachment(s)`, item.attachments);
-                                if (attCount > 0) {
-                                    alert(`DEBUG 1/2\n"${item.title || item.name}" has ${attCount} attachment(s)\nFirst attachment data starts with:\n${(item.attachments[0].data || 'MISSING').substring(0, 60)}`);
-                                }
-                            }
                             await this.syncToSupabase(storeName, item, includeMedia);
                             totalSynced++;
                         }
