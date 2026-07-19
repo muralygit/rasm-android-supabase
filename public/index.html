@@ -7352,11 +7352,29 @@ async function deleteEvent(eventId) {
                 return;
             }
             
-            expenses.forEach(expense => {
+            expenses.forEach((expense, index) => {
+                const hasReceipt = expense.receipt && expense.receipt.data;
                 expensesDiv.innerHTML += `
-                    <div class="payment-item">
-                        <span>${expense.description}</span>
-                        <span>₹${expense.amount} on ${new Date(expense.date).toLocaleDateString('en-IN')}</span>
+                    <div class="payment-item" style="flex-direction: column; align-items: stretch;">
+                        <div style="display: flex; justify-content: space-between; width: 100%;">
+                            <span>${expense.description}</span>
+                            <span>₹${expense.amount} on ${new Date(expense.date).toLocaleDateString('en-IN')}</span>
+                        </div>
+                        <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                            ${hasReceipt ? `
+                                <button type="button" onclick="viewExpenseReceipt(${eventId}, ${index})" class="btn-success" style="padding: 4px 10px; font-size: 0.85rem;">
+                                    <i class="fas fa-receipt"></i> View Receipt
+                                </button>
+                                <button type="button" onclick="removeExpenseReceipt(${eventId}, ${index})" style="padding: 4px 10px; font-size: 0.85rem; background:#e53935; color:white; border:none; border-radius:6px;">
+                                    <i class="fas fa-trash"></i> Remove
+                                </button>
+                            ` : `
+                                <input type="file" id="expenseReceiptInput_${eventId}_${index}" accept="image/*,application/pdf" style="font-size: 0.8rem; max-width: 180px;">
+                                <button type="button" onclick="attachExpenseReceipt(${eventId}, ${index})" style="padding: 4px 10px; font-size: 0.85rem; background:#43a047; color:white; border:none; border-radius:6px;">
+                                    <i class="fas fa-paperclip"></i> Attach Receipt
+                                </button>
+                            `}
+                        </div>
                     </div>
                 `;
             });
@@ -7367,6 +7385,81 @@ async function deleteEvent(eventId) {
                     Total Expenses: ₹${total}
                 </div>
             `;
+        }
+
+        // Attach a receipt file to a specific expense entry
+        async function attachExpenseReceipt(eventId, expenseIndex) {
+            const input = document.getElementById(`expenseReceiptInput_${eventId}_${expenseIndex}`);
+            const file = input && input.files && input.files[0];
+            if (!file) {
+                showNotification('Please choose a file first', 'error');
+                return;
+            }
+            if (file.size > 20 * 1024 * 1024) {
+                showNotification('File is too large (max 20MB)', 'error');
+                return;
+            }
+
+            const event = events.find(e => e.id === eventId);
+            if (!event || !event.expenses || !event.expenses[expenseIndex]) return;
+
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                event.expenses[expenseIndex].receipt = {
+                    name: file.name,
+                    type: file.type,
+                    size: file.size,
+                    data: e.target.result,
+                    uploadedAt: new Date().toISOString()
+                };
+
+                try {
+                    await updateData(STORES.EVENTS, event);
+                    showNotification('Receipt attached!', 'success');
+                    displayEventExpenses(eventId);
+                } catch (error) {
+                    console.error('Error attaching receipt:', error);
+                    showNotification('Error attaching receipt. Please try again.', 'error');
+                }
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // View a previously attached receipt
+        function viewExpenseReceipt(eventId, expenseIndex) {
+            const event = events.find(e => e.id === eventId);
+            const receipt = event && event.expenses && event.expenses[expenseIndex] && event.expenses[expenseIndex].receipt;
+            if (!receipt || !receipt.data) {
+                showNotification('No receipt found', 'error');
+                return;
+            }
+
+            if (receipt.type && receipt.type.startsWith('image/')) {
+                const win = window.open('', '_blank');
+                win.document.write(`<img src="${receipt.data}" style="max-width:100%;">`);
+            } else {
+                const link = document.createElement('a');
+                link.href = receipt.data;
+                link.download = receipt.name || 'receipt';
+                link.click();
+            }
+        }
+
+        // Remove a receipt from an expense entry
+        async function removeExpenseReceipt(eventId, expenseIndex) {
+            const event = events.find(e => e.id === eventId);
+            if (!event || !event.expenses || !event.expenses[expenseIndex]) return;
+
+            delete event.expenses[expenseIndex].receipt;
+
+            try {
+                await updateData(STORES.EVENTS, event);
+                showNotification('Receipt removed', 'success');
+                displayEventExpenses(eventId);
+            } catch (error) {
+                console.error('Error removing receipt:', error);
+                showNotification('Error removing receipt. Please try again.', 'error');
+            }
         }
 // Preview event attachments
 function previewEventAttachments(eventId) {
@@ -10611,6 +10704,68 @@ Position Saved: ✅ Yes
         return rehydrated;
     }
 
+    // Upload any base64 expense receipts (event.expenses[].receipt) to Storage,
+    // mirroring uploadItemAttachments but scoped to a single expense's receipt field.
+    async uploadExpenseReceipts(eventId, expenses) {
+        if (!expenses || expenses.length === 0) return expenses;
+
+        const updated = [];
+        for (const exp of expenses) {
+            if (exp && exp.receipt && typeof exp.receipt.data === 'string' && exp.receipt.data.startsWith('data:')) {
+                try {
+                    const blob = this.dataURLToBlob(exp.receipt.data);
+                    const safeName = (exp.receipt.name || 'receipt').replace(/[^a-zA-Z0-9._-]/g, '_');
+                    const path = `events/${eventId}/receipts/${Date.now()}_${safeName}`;
+
+                    const { error: uploadError } = await supabaseClient
+                        .storage
+                        .from(ATTACHMENTS_BUCKET)
+                        .upload(path, blob, { contentType: exp.receipt.type || blob.type, upsert: true });
+
+                    if (uploadError) throw uploadError;
+
+                    const { data: urlData } = supabaseClient
+                        .storage
+                        .from(ATTACHMENTS_BUCKET)
+                        .getPublicUrl(path);
+
+                    updated.push({ ...exp, receipt: { ...exp.receipt, data: urlData.publicUrl, storagePath: path } });
+                } catch (err) {
+                    console.error('Supabase Sync: Receipt upload failed', exp.receipt.name, err);
+                    this.showNotification(`⚠️ Receipt "${exp.receipt.name || 'file'}" failed to upload: ${err.message}`, 'error');
+                    updated.push(exp);
+                }
+            } else {
+                updated.push(exp);
+            }
+        }
+        return updated;
+    }
+
+    // Download Storage-URL receipts and convert back to base64 on pull
+    async rehydrateExpenseReceipts(expenses) {
+        if (!expenses || expenses.length === 0) return expenses;
+
+        const rehydrated = [];
+        for (const exp of expenses) {
+            if (exp && exp.receipt && typeof exp.receipt.data === 'string' && exp.receipt.data.startsWith('http')) {
+                try {
+                    const response = await fetch(exp.receipt.data);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const blob = await response.blob();
+                    const base64 = await this.blobToDataURL(blob);
+                    rehydrated.push({ ...exp, receipt: { ...exp.receipt, data: base64 } });
+                } catch (err) {
+                    console.error('Supabase Sync: Failed to rehydrate receipt', exp.receipt.name, err);
+                    rehydrated.push(exp);
+                }
+            } else {
+                rehydrated.push(exp);
+            }
+        }
+        return rehydrated;
+    }
+
     async syncToSupabase(storeName, data, includeMedia = null) {
         if (!syncEnabled || !data) return;
 
@@ -10670,6 +10825,24 @@ Position Saved: ✅ Yes
                 }
             }
             
+            // Expense receipts (events only) are uploaded independently of the main attachments array
+            if (includeMedia && storeName === 'events' && supabaseData.expenses && supabaseData.expenses.length > 0) {
+                const hasReceiptsToUpload = supabaseData.expenses.some(exp => exp && exp.receipt && exp.receipt.data);
+                if (hasReceiptsToUpload) {
+                    const uploadedExpenses = await this.uploadExpenseReceipts(localId, supabaseData.expenses);
+                    supabaseData = { ...supabaseData, expenses: uploadedExpenses };
+
+                    const expensesChanged = uploadedExpenses.some((exp, i) => exp?.receipt?.data !== data.expenses[i]?.receipt?.data);
+                    if (expensesChanged) {
+                        try {
+                            await originalFunctions.updateData(storeName, { ...data, expenses: uploadedExpenses });
+                        } catch (err) {
+                            console.error('Supabase Sync: Failed to save uploaded receipt URLs locally', err);
+                        }
+                    }
+                }
+            }
+            
             let formattedData = camelToSnake(supabaseData);
             
             formattedData._sync_source = 'local';
@@ -10686,9 +10859,13 @@ Position Saved: ✅ Yes
                 delete formattedData.id;
             }
             
+            const upsertOptions = (storeName === 'members' && !supabaseId)
+                ? { onConflict: 'contact' }
+                : undefined;
+
             const { data: upsertResult, error } = await supabaseClient
                 .from(tableName)
-                .upsert(formattedData)
+                .upsert(formattedData, upsertOptions)
                 .select();
                 
             if (error) {
@@ -10936,6 +11113,9 @@ Position Saved: ✅ Yes
                                 if (!isDuplicate) {
                                     if ((storeName === 'meetings' || storeName === 'events') && localData.attachments) {
                                         localData.attachments = await this.rehydrateAttachments(localData.attachments);
+                                    }
+                                    if (storeName === 'events' && localData.expenses) {
+                                        localData.expenses = await this.rehydrateExpenseReceipts(localData.expenses);
                                     }
 
                                     localData._firebaseId = docId;
