@@ -10621,6 +10621,29 @@ Position Saved: ✅ Yes
             let localId = data.id;
             let supabaseData = this.mapToSupabaseFormat(storeName, data);
             
+            // Foreign keys must reference the Supabase-assigned id, not the local device id
+            if (storeName === 'collections' && supabaseData.memberId) {
+                const mappedMemberId = await this.getSupabaseIdByLocalId('members', supabaseData.memberId);
+                if (mappedMemberId) {
+                    supabaseData = { ...supabaseData, memberId: mappedMemberId };
+                } else {
+                    console.warn(`Supabase Sync: No cloud id yet for local member ${supabaseData.memberId}; skipping this maintenance record for now`);
+                    this.showNotification(`⚠️ Skipped a maintenance record — its member hasn't finished syncing yet. Push again shortly.`, 'error');
+                    return;
+                }
+            }
+            
+            if (storeName === 'eventCollections' && supabaseData.eventId) {
+                const mappedEventId = await this.getSupabaseIdByLocalId('events', supabaseData.eventId);
+                if (mappedEventId) {
+                    supabaseData = { ...supabaseData, eventId: mappedEventId };
+                } else {
+                    console.warn(`Supabase Sync: No cloud id yet for local event ${supabaseData.eventId}; skipping this event payment record for now`);
+                    this.showNotification(`⚠️ Skipped an event payment record — its event hasn't finished syncing yet. Push again shortly.`, 'error');
+                    return;
+                }
+            }
+            
             if (includeMedia === null) {
                 includeMedia = localStorage.getItem('mediaSyncEnabled') === 'true';
             }
