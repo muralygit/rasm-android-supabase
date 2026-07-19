@@ -9371,6 +9371,9 @@ const SYNC_CONFIG = {
     BATCH_SIZE: 50
 };
 
+// Storage bucket used for meeting/event attachments (instead of embedding base64 in the DB)
+const ATTACHMENTS_BUCKET = 'rasm-attachments';
+
 // Global variables
 let supabaseClient;
 let syncEnabled = false;
@@ -10520,6 +10523,94 @@ Position Saved: ✅ Yes
     }
 
     // Sync data to Supabase (with media toggle support)
+    // Convert a base64 data URL into a Blob for uploading
+    dataURLToBlob(dataUrl) {
+        const [header, base64] = dataUrl.split(',');
+        const mimeMatch = header.match(/data:(.*?);base64/);
+        const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+        const binary = atob(base64);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+        return new Blob([bytes], { type: mime });
+    }
+
+    // Convert a Blob back into a base64 data URL
+    blobToDataURL(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    // Upload any base64 attachments for a meeting/event to Supabase Storage,
+    // replacing their .data with a public URL so the DB row stays small.
+    async uploadItemAttachments(storeName, itemId, attachments) {
+        if (!attachments || attachments.length === 0) return attachments;
+
+        const uploaded = [];
+        for (const att of attachments) {
+            if (att && typeof att.data === 'string' && att.data.startsWith('data:')) {
+                try {
+                    const blob = this.dataURLToBlob(att.data);
+                    const safeName = (att.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+                    const path = `${storeName}/${itemId}/${Date.now()}_${safeName}`;
+
+                    const { error: uploadError } = await supabaseClient
+                        .storage
+                        .from(ATTACHMENTS_BUCKET)
+                        .upload(path, blob, { contentType: att.type || blob.type, upsert: true });
+
+                    if (uploadError) throw uploadError;
+
+                    const { data: urlData } = supabaseClient
+                        .storage
+                        .from(ATTACHMENTS_BUCKET)
+                        .getPublicUrl(path);
+
+                    uploaded.push({ ...att, data: urlData.publicUrl, storagePath: path });
+                } catch (err) {
+                    console.error('Supabase Sync: Attachment upload failed', att.name, err);
+                    this.showNotification(`⚠️ Attachment "${att.name || 'file'}" failed to upload: ${err.message}`, 'error');
+                    // Keep it out of what we push to Supabase (avoid re-bloating the row),
+                    // but don't touch the local copy so nothing is lost on this device.
+                    uploaded.push({ ...att, _uploadFailed: true });
+                }
+            } else {
+                uploaded.push(att);
+            }
+        }
+        return uploaded;
+    }
+
+    // Download Storage-URL attachments and convert back to base64 so the
+    // existing photo-viewing UI (which expects attachment.data as a data URL) keeps working.
+    async rehydrateAttachments(attachments) {
+        if (!attachments || attachments.length === 0) return attachments;
+
+        const rehydrated = [];
+        for (const att of attachments) {
+            if (att && typeof att.data === 'string' && att.data.startsWith('http')) {
+                try {
+                    const response = await fetch(att.data);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const blob = await response.blob();
+                    const base64 = await this.blobToDataURL(blob);
+                    rehydrated.push({ ...att, data: base64 });
+                } catch (err) {
+                    console.error('Supabase Sync: Failed to rehydrate attachment', att.name, err);
+                    // Keep the URL as a fallback so the reference isn't lost
+                    rehydrated.push(att);
+                }
+            } else {
+                rehydrated.push(att);
+            }
+        }
+        return rehydrated;
+    }
+
     async syncToSupabase(storeName, data, includeMedia = null) {
         if (!syncEnabled || !data) return;
 
@@ -10539,6 +10630,10 @@ Position Saved: ✅ Yes
                 delete dataWithoutMedia.attachments;
                 supabaseData = dataWithoutMedia;
                 console.log(`Supabase Sync: Media files excluded from ${storeName}/${data.id}`);
+            } else if (includeMedia && (storeName === 'events' || storeName === 'meetings') &&
+                       supabaseData.attachments && supabaseData.attachments.length > 0) {
+                const uploadedAttachments = await this.uploadItemAttachments(storeName, localId, supabaseData.attachments);
+                supabaseData = { ...supabaseData, attachments: uploadedAttachments };
             }
             
             let formattedData = camelToSnake(supabaseData);
@@ -10800,6 +10895,10 @@ Position Saved: ✅ Yes
                                 
                                 const isDuplicate = await this.checkForDuplicate(storeName, localData);
                                 if (!isDuplicate) {
+                                    if ((storeName === 'meetings' || storeName === 'events') && localData.attachments) {
+                                        localData.attachments = await this.rehydrateAttachments(localData.attachments);
+                                    }
+
                                     localData._firebaseId = docId;
                                     localData._supabaseId = docId;
                                     localData._syncSource = 'remote';
