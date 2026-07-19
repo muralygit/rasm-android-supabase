@@ -10574,9 +10574,9 @@ Position Saved: ✅ Yes
                 } catch (err) {
                     console.error('Supabase Sync: Attachment upload failed', att.name, err);
                     this.showNotification(`⚠️ Attachment "${att.name || 'file'}" failed to upload: ${err.message}`, 'error');
-                    // Keep it out of what we push to Supabase (avoid re-bloating the row),
-                    // but don't touch the local copy so nothing is lost on this device.
-                    uploaded.push({ ...att, _uploadFailed: true });
+                    // Keep the original base64 attachment as-is so it stays available locally
+                    // and will simply be retried automatically on the next push.
+                    uploaded.push(att);
                 }
             } else {
                 uploaded.push(att);
@@ -10634,6 +10634,17 @@ Position Saved: ✅ Yes
                        supabaseData.attachments && supabaseData.attachments.length > 0) {
                 const uploadedAttachments = await this.uploadItemAttachments(storeName, localId, supabaseData.attachments);
                 supabaseData = { ...supabaseData, attachments: uploadedAttachments };
+
+                // Save the new Storage URLs back to the local copy so the next push
+                // doesn't re-upload attachments that are already in Storage.
+                const changed = uploadedAttachments.some((a, i) => a.data !== data.attachments[i]?.data);
+                if (changed) {
+                    try {
+                        await originalFunctions.updateData(storeName, { ...data, attachments: uploadedAttachments });
+                    } catch (err) {
+                        console.error('Supabase Sync: Failed to save uploaded attachment URLs locally', err);
+                    }
+                }
             }
             
             let formattedData = camelToSnake(supabaseData);
